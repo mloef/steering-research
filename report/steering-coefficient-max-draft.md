@@ -112,6 +112,7 @@ We found that a repetition penalty of 1.1 provides optimal results by balancing 
 ### Token Count Optimization
 
 The number of tokens generated significantly impacts metric reliability:
+
 ![Effect of Token Count on Coefficient vs Avg Logprobs](token-count-comparison.png)
 
 Key findings:
