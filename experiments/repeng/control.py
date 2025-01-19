@@ -73,7 +73,7 @@ class ControlModel(torch.nn.Module):
         """
 
         raw_control = {}
-        for layer_id in self.layer_ids:
+        for layer_id in control.directions.keys():
             raw_control[layer_id] = torch.tensor(
                 coeff * control.directions[layer_id]
             ).to(self.model.device, dtype=self.model.dtype)
@@ -106,7 +106,7 @@ class ControlModel(torch.nn.Module):
         layers = model_layer_list(self.model)
         for layer_id in self.layer_ids:
             layer: ControlModule = layers[layer_id]  # type: ignore
-            if control is None:
+            if control is None or control.get(layer_id) is None:
                 layer.reset()
             else:
                 layer.set_control(BlockControlParams(control[layer_id], **kwargs))

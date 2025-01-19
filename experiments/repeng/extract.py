@@ -24,6 +24,7 @@ class DatasetEntry:
 class ControlVector:
     model_type: str
     directions: dict[int, np.ndarray]
+    undecoded_directions: dict[int, np.ndarray] | None = None
 
     @classmethod
     def train(
@@ -50,7 +51,7 @@ class ControlVector:
             ControlVector: The trained vector.
         """
         with torch.inference_mode():
-            dirs = read_representations(
+            dirs, _ = read_representations(
                 model,
                 tokenizer,
                 dataset,
@@ -68,6 +69,7 @@ class ControlVector:
         *,
         decode: bool = True,
         method: typing.Literal["pca_diff", "pca_center", "umap"] = "pca_center",
+        use_residuals: bool = False,
         **kwargs,
     ) -> "ControlVector":
         """
@@ -93,19 +95,54 @@ class ControlVector:
             ControlVector: The trained vector.
         """
 
-        def transform_hiddens(hiddens: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
+        residual_scales = {}
+        def transform_hiddens_with_residuals(hiddens: dict[int, np.ndarray]) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
             sae_hiddens = {}
+            residuals = {}
             for k, v in tqdm.tqdm(hiddens.items(), desc="sae encoding"):
-                sae_hiddens[k] = sae.layers[k].encode(v)
-            return sae_hiddens
+                encoded = sae.layers[k].encode(v)
+                decoded = sae.layers[k].decode(encoded)
+                sae_hiddens[k] = encoded
+                residuals[k] = v - decoded
+
+                residual_scale = 0
+                for i in range(len(v)):
+                    residual_scale += calculate_residual_scale(decoded[i], residuals[k][i], v[i])
+                residual_scale /= len(v)
+                residual_scales[k] = residual_scale
+
+            return sae_hiddens, residuals
+
+        def calculate_residual_scale(decoded_direction: np.ndarray, residual: np.ndarray, hiddens: np.ndarray) -> float:
+            """
+            Calculate appropriate scaling factor for residuals based on relative projections.
+            
+            Args:
+                decoded_direction: The decoded SAE direction
+                residual: The normalized residual direction
+                hiddens: Original hidden states for this layer [n_samples, hidden_dim]
+            """
+            # Project original hiddens onto both directions
+            dir_proj = np.abs(project_onto_direction(hiddens, decoded_direction))
+            res_proj = np.abs(project_onto_direction(hiddens, residual))
+            
+            # Calculate mean projection magnitudes
+            mean_dir_proj = np.mean(dir_proj)
+            mean_res_proj = np.mean(res_proj)
+            #print(mean_dir_proj, mean_res_proj)
+            # Scale residual to match relative magnitude of main direction
+            residual_scale = mean_res_proj / mean_dir_proj
+            #print(residual_scale)
+            return residual_scale
 
         with torch.inference_mode():
-            dirs = read_representations(
+            dirs, residuals = read_representations(
                 model,
                 tokenizer,
                 dataset,
-                transform_hiddens=transform_hiddens,
+                transform_hiddens=transform_hiddens_with_residuals,
                 method=method,
+                sae=sae,
                 **kwargs,
             )
 
@@ -113,10 +150,12 @@ class ControlVector:
             if decode:
                 for k, v in tqdm.tqdm(dirs.items(), desc="sae decoding"):
                     final_dirs[k] = sae.layers[k].decode(v)
+                    if use_residuals:
+                        final_dirs[k] += residuals[k] * residual_scales[k]
             else:
                 final_dirs = dirs
 
-        return cls(model_type=model.config.model_type, directions=final_dirs)
+        return cls(model_type=model.config.model_type, directions=final_dirs, undecoded_directions=dirs)
 
     def export_gguf(self, path: os.PathLike[str] | str):
         """
@@ -246,10 +285,12 @@ def read_representations(
     inputs: list[DatasetEntry],
     hidden_layers: typing.Iterable[int] | None = None,
     batch_size: int = 32,
-    method: typing.Literal["pca_diff", "pca_center", "umap"] = "pca_diff",
+    method: typing.Literal["pca_diff", "pca_center", "umap", "mean_center", "sae_topk_center", "sae_topk_diff"] = "pca_diff",
     transform_hiddens: (
         typing.Callable[[dict[int, np.ndarray]], dict[int, np.ndarray]] | None
     ) = None,
+    k: int = 100,  # Number of top SAE features to keep
+    sae: typing.Optional[Sae] = None,  # Added sae parameter
 ) -> dict[int, np.ndarray]:
     """
     Extract the representations based on the contrast dataset.
@@ -268,61 +309,142 @@ def read_representations(
         model, tokenizer, train_strs, hidden_layers, batch_size
     )
 
+    raw_residuals = None
     if transform_hiddens is not None:
-        layer_hiddens = transform_hiddens(layer_hiddens)
+        layer_hiddens, raw_residuals = transform_hiddens(layer_hiddens)
 
-    # get directions for each layer using PCA
+    # get directions for each layer
     directions: dict[int, np.ndarray] = {}
-    for layer in tqdm.tqdm(hidden_layers):
+    residuals: dict[int, np.ndarray] = {}
+    for layer in tqdm.tqdm(hidden_layers, desc="extracting directions"):
         h = layer_hiddens[layer]
         assert h.shape[0] == len(inputs) * 2
 
-        if method == "pca_diff":
-            train = h[::2] - h[1::2]
-        elif method == "pca_center":
-            center = (h[::2] + h[1::2]) / 2
-            train = h
-            train[::2] -= center
-            train[1::2] -= center
-        elif method == "umap":
-            train = h
+        if method in ["sae_topk_diff", "sae_topk_center"]:
+            if sae is None:
+                raise ValueError("sae_topk method requires sae parameter")
+            if method == "sae_topk_diff":
+                # Get difference between positive and negative examples
+                diff = h[::2] - h[1::2]
+                # Get mean difference
+                mean_direction = np.mean(diff, axis=0)
+            elif method == "sae_topk_center":
+                center = (h[::2] + h[1::2]) / 2
+                train = h
+                train[::2] -= center
+                train[1::2] -= center
+                mean_direction = np.mean(train[::2], axis=0)
+            
+            # Use SAE to get sparse features
+            sparse_features = sae.layers[layer].get_topk_features(mean_direction[np.newaxis, :], k)
+            sparse_features = sparse_features[0] #remove batch dimension
+            sparse_features /= np.linalg.norm(sparse_features) #normalize
+            directions[layer] = sparse_features
         else:
-            raise ValueError("unknown method " + method)
+            # Original code for other methods
+            if method == "pca_diff":
+                train = h[::2] - h[1::2]
+            elif method == "pca_center" or method == "mean_center":
+                center = (h[::2] + h[1::2]) / 2
+                train = h
+                train[::2] -= center
+                train[1::2] -= center
+            elif method == "umap":
+                train = h
+            else:
+                raise ValueError("unknown method " + method)
 
-        if method != "umap":
-            # shape (1, n_features)
-            pca_model = PCA(n_components=1, whiten=False).fit(train)
-            # shape (n_features,)
-            directions[layer] = pca_model.components_.astype(np.float32).squeeze(axis=0)
-        else:
-            # still experimental so don't want to add this as a real dependency yet
-            import umap  # type: ignore
+            if method == "mean_center":
+                # Take mean of only positive examples (every other starting at index 0)
+                # this is the mean direction, as we centered it earlier and every other example is the negative
+                mean_direction = np.mean(train[::2], axis=0)
+                directions[layer] = mean_direction / np.linalg.norm(mean_direction)
+            elif method != "umap":
+                np.random.seed(42)
+                torch.manual_seed(42)
+                
+                # Convert to PyTorch tensor and move to GPU
+                train_torch = torch.from_numpy(train).cuda()
+                
+                # Center the data (PyTorch SVD doesn't center automatically)
+                train_mean = train_torch.mean(dim=0, keepdim=True)
+                train_centered = train_torch - train_mean
+                
+                # Randomized SVD version
+                n_oversamples = 10
+                n_iter = 5
+                
+                # Random projection matrix
+                Q = torch.randn(train_torch.shape[1], 1 + n_oversamples, device='cuda')
+                
+                # Power iteration
+                for _ in range(n_iter):
+                    Q = train_centered.T @ (train_centered @ Q)
+                    Q, _ = torch.linalg.qr(Q)
+                
+                # Final small SVD
+                small_matrix = train_centered @ Q
+                U_small, S_small, V_small = torch.svd(small_matrix)
+                
+                # Extract first principal component
+                direction_torch = (Q @ V_small[:, 0]).cpu().numpy()
 
-            umap_model = umap.UMAP(n_components=1)
-            embedding = umap_model.fit_transform(train).astype(np.float32)
-            directions[layer] = np.sum(train * embedding, axis=0) / np.sum(embedding)
+                # Fix sign: make the maximum magnitude element positive
+                max_magnitude_idx = np.argmax(np.abs(direction_torch))
+                if direction_torch[max_magnitude_idx] < 0:
+                    direction_torch *= -1
 
-        # calculate sign
-        projected_hiddens = project_onto_direction(h, directions[layer])
+                directions[layer] = direction_torch
+            else:
+                # still experimental so don't want to add this as a real dependency yet
+                import umap  # type: ignore
 
-        # order is [positive, negative, positive, negative, ...]
-        positive_smaller_mean = np.mean(
-            [
-                projected_hiddens[i] < projected_hiddens[i + 1]
-                for i in range(0, len(inputs) * 2, 2)
-            ]
-        )
-        positive_larger_mean = np.mean(
-            [
-                projected_hiddens[i] > projected_hiddens[i + 1]
-                for i in range(0, len(inputs) * 2, 2)
-            ]
-        )
+                umap_model = umap.UMAP(n_components=1)
+                embedding = umap_model.fit_transform(train).astype(np.float32)
+                directions[layer] = np.sum(train * embedding, axis=0) / np.sum(embedding)
 
-        if positive_smaller_mean > positive_larger_mean:  # type: ignore
-            directions[layer] *= -1
+            # calculate sign
+            projected_hiddens = project_onto_direction(h, directions[layer])
 
-    return directions
+            # order is [positive, negative, positive, negative, ...]
+            positive_smaller_mean = np.mean(
+                [
+                    projected_hiddens[i] < projected_hiddens[i + 1]
+                    for i in range(0, len(inputs) * 2, 2)
+                ]
+            )
+            positive_larger_mean = np.mean(
+                [
+                    projected_hiddens[i] > projected_hiddens[i + 1]
+                    for i in range(0, len(inputs) * 2, 2)
+                ]
+            )
+
+            if positive_smaller_mean > positive_larger_mean:  # type: ignore
+                directions[layer] *= -1
+        
+        if raw_residuals is not None:
+            layer_residuals = raw_residuals[layer]
+            match (method):
+                case "sae_topk_diff" | "pca_diff":
+                    # Get difference between positive and negative examples
+                    diff = layer_residuals[::2] - layer_residuals[1::2]
+                    # Get mean difference
+                    mean_residuals = np.mean(diff, axis=0)
+                    residuals[layer] = mean_residuals
+                case "sae_topk_center" | "pca_center" | "mean_center":
+                    center = (layer_residuals[::2] + layer_residuals[1::2]) / 2
+                    layer_residuals[::2] -= center
+                    mean_residuals = np.mean(layer_residuals[::2], axis=0) #only positive examples
+                    residuals[layer] = mean_residuals
+                case "umap":
+                    raise ValueError("umap method not yet implemented for residuals")
+                case _:
+                    raise ValueError(f"unknown method when calculating residuals: {method}")
+
+            residuals[layer] /= np.linalg.norm(residuals[layer]) 
+
+    return directions, residuals
 
 
 def batched_get_hiddens(
@@ -343,7 +465,7 @@ def batched_get_hiddens(
     ]
     hidden_states = {layer: [] for layer in hidden_layers}
     with torch.no_grad():
-        for batch in tqdm.tqdm(batched_inputs):
+        for batch in tqdm.tqdm(batched_inputs, desc="generating tokens"):
             # get the last token, handling right padding if present
             encoded_batch = tokenizer(batch, padding=True, return_tensors="pt")
             encoded_batch = encoded_batch.to(model.device)

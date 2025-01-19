@@ -18,6 +18,48 @@ class SaeLayer(typing.Protocol):
 class Sae:
     layers: dict[int, SaeLayer]
 
+    def steer_with_features(self, feature_dict: dict[int, dict[int, float]], model_type: str = "llama") -> "ControlVector":
+        """Create a steering vector by directly activating SAE features.
+        
+        Args:
+            feature_dict: Dictionary mapping layer IDs to {feature_id: strength} dicts
+            model_type: The model type for the ControlVector (default: "llama")
+            
+        Returns:
+            ControlVector with the specified features activated
+            
+        Example:
+            # Activate feature 123 in layer 24 with strength 0.5
+            # and feature 456 in layer 30 with strength -0.3
+            vector = sae.steer_with_features({
+                24: {123: 0.5},
+                30: {456: -0.3}
+            })
+        """
+        from repeng.extract import ControlVector
+        
+        steering_vectors = {}
+        
+        for layer_id, features in feature_dict.items():
+            if layer_id not in self.layers:
+                continue
+                
+            # Create zero vector in feature space
+            feature_vec = np.zeros(self.layers[layer_id].sae.num_latents, dtype=np.float32)
+            
+            # Set specified feature strengths
+            for feature_id, strength in features.items():
+                feature_vec[feature_id] = strength
+                
+            # Decode back to activation space
+            steering_vectors[layer_id] = self.layers[layer_id].decode(feature_vec)
+            
+        # Create and return ControlVector
+        return ControlVector(
+            model_type=model_type,
+            directions=steering_vectors,
+            undecoded_directions={k: v for k, v in feature_dict.items() if k in steering_vectors}
+        )
 
 def from_eleuther(
     device: str = "cpu",  # saes wants str | torch.device, safetensors wants str | int... so str it is
@@ -58,11 +100,35 @@ def from_eleuther(
             # numpy doesn't like bfloat16
             return out.cpu().float().numpy()
 
+        def get_topk_features(self, features: np.ndarray, k: int) -> np.ndarray:
+            """Get a sparse vector containing only the top k features from SAE activations.
+            
+            Args:
+                activation: Input activation tensor
+                k: Number of top features to keep
+                
+            Returns:
+                Sparse vector with only top k features preserved
+            """
+            # Get indices of top k features by absolute value
+            top_k_indices = np.abs(features).argsort(axis=-1)[:, -k:]
+            
+            # Create mask of zeros with ones at top k indices
+            mask = np.zeros_like(features)
+            # Handle batched input
+            for i in range(features.shape[0]):
+                mask[i, top_k_indices[i]] = 1
+                
+            # Apply mask to keep only top k features
+            sparse_features = features * mask
+            
+            return sparse_features
+
         def decode(self, features: np.ndarray) -> np.ndarray:
             # TODO: see encode, this is not great. `sae` ships with kernels for doing this sparsely, we should use them
             ft = torch.from_numpy(features).to(self.sae.device, dtype=dtype)
-            decoded = ft @ self.sae.W_dec.mT.T
-            return decoded.cpu().float().numpy()
+            decoded = ft @ self.sae.W_dec
+            return decoded.cpu().detach().float().numpy()
 
     # TODO: only download requested layers?
     base_path = pathlib.Path(huggingface_hub.snapshot_download(repo, revision=revision))
@@ -74,12 +140,8 @@ def from_eleuther(
         with (layer_path / "cfg.json").open() as f:
             cfg_dict = json.load(f)
             d_in = cfg_dict.pop("d_in")
-            try:
-                # param removed in SAE lib but not in uploaded HF configs
-                del cfg_dict["signed"]
-            except KeyError as _:
-                # for when they fix it eventually
-                pass
+            if 'signed' in cfg_dict:
+                del cfg_dict['signed']
             cfg = eleuther_sae.SaeConfig(**cfg_dict)
 
         layer_sae = eleuther_sae.Sae(d_in, cfg, device=device, dtype=dtype)
