@@ -12,11 +12,12 @@ My research demonstrates that average log probabilities provide the most reliabl
 For detailed methodology and results, see the full writeup in `/report/steering-coefficient.md`.
 
 ## Notebooks
+
 - **Interactive Demo**: A Jupyter notebook demonstrating the steering vector coefficient selection in real-time: `experiments/notebooks/interactive_demo.ipynb`.
 
 - **Results & Analysis**: Comprehensive evaluation of different metrics and methods for coefficient selection, including comparisons with existing approaches: `experiments/notebooks/results.ipynb`.
 
-- **Autograding**: Implementation of LLM-based grading for steering vector effectiveness: `experiments/notebooks/autograding_steering.ipynb`.
+- **Autograding**: Implementation of LLM-based grading for steering vector effectiveness: `experiments/notebooks/autograding_steering.ipynb`. Note this is not included in the report, as it's stil a work in progress.
 
 ## Requirements
 
@@ -30,4 +31,5 @@ For detailed methodology and results, see the full writeup in `/report/steering-
 ## Credits
 
 Thank you to @vooooogel for the excellent repeng library, which this is based on.
+
 Thank you to Plastic Labs for sponsoring this research.
