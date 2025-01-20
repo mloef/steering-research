@@ -13,7 +13,9 @@ For detailed methodology and results, see the full writeup in `/report/steering-
 
 ## Notebooks
 
-- **Interactive Demo**: A demo that runs the coefficient selection algorithm and lets you chat with a steered base or instruct model: `experiments/notebooks/interactive_demo.ipynb`.
+- **Interactive Demo**: A demo that runs the coefficient selection algorithm and lets you generate with a steered base or instruct model: `experiments/notebooks/interactive_demo.ipynb`.
+  ![image](https://github.com/user-attachments/assets/a9f46aaa-b1c1-48ae-becd-350c6b685d23)
+
 
 - **Results & Analysis**: Comprehensive evaluation of different metrics and methods for coefficient selection, including comparisons with existing approaches: `experiments/notebooks/results.ipynb`.
 
