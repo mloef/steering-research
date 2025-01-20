@@ -13,7 +13,7 @@ For detailed methodology and results, see the full writeup in `/report/steering-
 
 ## Notebooks
 
-- **Interactive Demo**: A Jupyter notebook demonstrating the steering vector coefficient selection in real-time: `experiments/notebooks/interactive_demo.ipynb`.
+- **Interactive Demo**: A demo that runs the coefficient selection algorithm and lets you chat with a steered base or instruct model: `experiments/notebooks/interactive_demo.ipynb`.
 
 - **Results & Analysis**: Comprehensive evaluation of different metrics and methods for coefficient selection, including comparisons with existing approaches: `experiments/notebooks/results.ipynb`.
 
@@ -26,7 +26,7 @@ For detailed methodology and results, see the full writeup in `/report/steering-
 - For autograding: Anthropic API key
 - GPU requirements (not optimized, sorry):
   - Interactive demo: 93GB+ VRAM (H100 NVL) or 2x A100 80GB
-  - Results/autograding notebooks: 2x A100 80GB
+  - Results & autograding notebooks: 2x A100 80GB
 
 ## Credits
 
